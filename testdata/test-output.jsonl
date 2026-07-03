@@ -1,0 +1,20 @@
+{"Time":"2026-06-24T00:09:40.292936+01:00","Action":"start","Package":"github.com/tomhjp/testtrace"}
+{"Time":"2026-06-24T00:09:40.293005+01:00","Action":"start","Package":"github.com/tomhjp/testtrace/cmd/testtrace"}
+{"Time":"2026-06-24T00:09:40.293075+01:00","Action":"output","Package":"github.com/tomhjp/testtrace/cmd/testtrace","Output":"?   \tgithub.com/tomhjp/testtrace/cmd/testtrace\t[no test files]\n"}
+{"Time":"2026-06-24T00:09:40.293122+01:00","Action":"skip","Package":"github.com/tomhjp/testtrace/cmd/testtrace","Elapsed":0}
+{"Time":"2026-06-24T00:09:40.293134+01:00","Action":"start","Package":"github.com/tomhjp/testtrace/referencetests"}
+{"Time":"2026-06-24T00:09:40.293158+01:00","Action":"run","Package":"github.com/tomhjp/testtrace/referencetests","Test":"TestA"}
+{"Time":"2026-06-24T00:09:40.293163+01:00","Action":"output","Package":"github.com/tomhjp/testtrace/referencetests","Test":"TestA","Output":"=== RUN   TestA\n"}
+{"Time":"2026-06-24T00:09:40.293173+01:00","Action":"output","Package":"github.com/tomhjp/testtrace/referencetests","Test":"TestA","Output":"log line from TestA\n"}
+{"Time":"2026-06-24T00:09:40.293187+01:00","Action":"output","Package":"github.com/tomhjp/testtrace/referencetests","Test":"TestA","Output":"--- PASS: TestA (0.00s)\n"}
+{"Time":"2026-06-24T00:09:40.293189+01:00","Action":"pass","Package":"github.com/tomhjp/testtrace/referencetests","Test":"TestA","Elapsed":0}
+{"Time":"2026-06-24T00:09:40.293196+01:00","Action":"output","Package":"github.com/tomhjp/testtrace/referencetests","Output":"PASS\n"}
+{"Time":"2026-06-24T00:09:40.293207+01:00","Action":"output","Package":"github.com/tomhjp/testtrace/referencetests","Output":"ok  \tgithub.com/tomhjp/testtrace/referencetests\t(cached)\n"}
+{"Time":"2026-06-24T00:09:40.293213+01:00","Action":"pass","Package":"github.com/tomhjp/testtrace/referencetests","Elapsed":0}
+{"Time":"2026-06-24T00:09:40.876584+01:00","Action":"run","Package":"github.com/tomhjp/testtrace","Test":"TestJSONRoundTrip"}
+{"Time":"2026-06-24T00:09:40.876647+01:00","Action":"output","Package":"github.com/tomhjp/testtrace","Test":"TestJSONRoundTrip","Output":"=== RUN   TestJSONRoundTrip\n"}
+{"Time":"2026-06-24T00:09:40.986709+01:00","Action":"output","Package":"github.com/tomhjp/testtrace","Test":"TestJSONRoundTrip","Output":"--- PASS: TestJSONRoundTrip (0.11s)\n"}
+{"Time":"2026-06-24T00:09:40.986731+01:00","Action":"pass","Package":"github.com/tomhjp/testtrace","Test":"TestJSONRoundTrip","Elapsed":0.11}
+{"Time":"2026-06-24T00:09:40.986934+01:00","Action":"output","Package":"github.com/tomhjp/testtrace","Output":"PASS\n"}
+{"Time":"2026-06-24T00:09:40.987154+01:00","Action":"output","Package":"github.com/tomhjp/testtrace","Output":"ok  \tgithub.com/tomhjp/testtrace\t0.694s\n"}
+{"Time":"2026-06-24T00:09:40.988175+01:00","Action":"pass","Package":"github.com/tomhjp/testtrace","Elapsed":0.695}

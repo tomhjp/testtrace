@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -21,6 +23,14 @@ type (
 	pkgName   string
 	testName  string
 )
+
+func (t testName) parent() (testName, bool) {
+	i := strings.LastIndexByte(string(t), '/')
+	if i < 0 {
+		return "", false
+	}
+	return t[:i], true
+}
 
 type TraceWriter struct {
 	enc     *jsontext.Encoder
@@ -315,7 +325,7 @@ func (tw *TraceWriter) closeTID(pid processID, test testName) (threadID, error) 
 	if tid == 0 {
 		return 0, fmt.Errorf("tried to close span for test %q but it didn't have a start", test)
 	}
-	tw.tids[pid].closeTID(tid)
+	tw.tids[pid].closeTID(test)
 	return tid, nil
 }
 
@@ -370,8 +380,8 @@ func (tw *TraceWriter) timestampFor(t2j *test2JSONEvent) microseconds {
 
 // tids is the metadata for all tests of a single test package.
 type tids struct {
-	assigned map[testName]threadID // All assigned thread IDs across the test package lifetime.
-	open     map[threadID]bool     // The set of currently running thread IDs at this moment in time.
+	assigned map[testName]threadID   // All assigned thread IDs across the test package lifetime.
+	open     map[threadID][]testName // The stack of currently running tests per thread, innermost last.
 }
 
 func (t *tids) getTID(test testName) threadID {
@@ -379,7 +389,7 @@ func (t *tids) getTID(test testName) threadID {
 		t.assigned = make(map[testName]threadID)
 	}
 	if t.open == nil {
-		t.open = make(map[threadID]bool)
+		t.open = make(map[threadID][]testName)
 	}
 
 	if tid, ok := t.assigned[test]; ok {
@@ -391,18 +401,44 @@ func (t *tids) getTID(test testName) threadID {
 
 func (t *tids) getOrOpenTID(test testName) (threadID, bool) {
 	if tid := t.getTID(test); tid != 0 {
+		t.open[tid] = append(t.open[tid], test)
 		return tid, false
 	}
 
+	// A sub-test shares its parent's thread if the parent is the innermost span
+	// currently open there; that keeps each thread's begin/end events strictly
+	// nested even when sub-tests run in parallel.
+	if parent, ok := test.parent(); ok {
+		if tid, ok := t.assigned[parent]; ok {
+			if stack := t.open[tid]; len(stack) > 0 && stack[len(stack)-1] == parent {
+				t.assigned[test] = tid
+				t.open[tid] = append(stack, test)
+				return tid, false
+			}
+		}
+	}
+
 	for tid := threadID(1); ; tid++ {
-		if !t.open[tid] {
+		if len(t.open[tid]) == 0 {
 			t.assigned[test] = tid
-			t.open[tid] = true
+			t.open[tid] = append(t.open[tid], test)
 			return tid, true
 		}
 	}
 }
 
-func (t *tids) closeTID(tid threadID) {
-	t.open[tid] = false
+func (t *tids) closeTID(test testName) {
+	tid := t.assigned[test]
+	stack := t.open[tid]
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] == test {
+			stack = slices.Delete(stack, i, i+1)
+			break
+		}
+	}
+	if len(stack) == 0 {
+		delete(t.open, tid)
+	} else {
+		t.open[tid] = stack
+	}
 }

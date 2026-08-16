@@ -19,16 +19,15 @@ type event struct {
 	// The event type. This is a single character which changes depending on the
 	// type of event being output.
 	Type eventType `json:"ph"`
-	// The tracing clock timestamp of the event. The timestamps are provided at
-	// microsecond granularity.
-	Timestamp int64 `json:"ts"`
+	// The number of microseconds since the start of the trace.
+	Timestamp microseconds `json:"ts"`
 	// Optional. The thread clock timestamp of the event. The timestamps are
 	// provided at microsecond granularity.
-	ThreadTimestamp uint64 `json:"tts,omitzero"`
+	ThreadTimestamp microseconds `json:"tts,omitzero"`
 	// The process ID for the process that output this event.
-	ProcessID int `json:"pid"`
+	ProcessID processID `json:"pid"`
 	// The thread ID for the thread that output this event.
-	ThreadID int `json:"tid"`
+	ThreadID threadID `json:"tid"`
 	// Any arguments provided for the event. Some of the event types have required
 	// argument fields, otherwise, you can put any information you wish in here.
 	// The arguments are displayed in Trace Viewer when you view an event in the
@@ -111,3 +110,7 @@ func (e event) MarshalJSON() ([]byte, error) {
 
 	return json.Marshal(shadow)
 }
+
+// microseconds is the current time represented as the number of microseconds
+// since the trace started.
+type microseconds int64

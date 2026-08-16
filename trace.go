@@ -5,7 +5,6 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
-	"log"
 	"runtime"
 	"time"
 )
@@ -13,14 +12,27 @@ import (
 const (
 	catPkg  category = "pkg"
 	catTest category = "test"
+	runPID           = 1 // The "PID" for the parent process of the whole test suite.
+)
+
+type (
+	processID int
+	threadID  int
+	pkgName   string
+	testName  string
 )
 
 type TraceWriter struct {
-	enc      *jsontext.Encoder
-	start    time.Time
-	pids     map[string]int            // maps package name -> pid
-	tids     map[string]map[string]int // maps package name -> test name -> tid
-	tidPools map[string]tidPool        // maps package name -> TID pool
+	enc     *jsontext.Encoder
+	start   time.Time
+	nextPID processID
+	pids    map[pkgName]processID
+	tids    map[processID]*tids
+
+	// lastTimestamp is the timestamp of the most recently recorded event, and is
+	// used as the default time when test2json omits a timestamp (e.g. for cached
+	// results).
+	lastTimestamp microseconds
 
 	packagesRunning int
 	packagesPassed  int
@@ -37,7 +49,8 @@ type TraceWriterOption func(*TraceWriter)
 
 func NewTraceWriter(w io.Writer, opts ...TraceWriterOption) (*TraceWriter, error) {
 	tw := &TraceWriter{
-		enc: jsontext.NewEncoder(w),
+		enc:     jsontext.NewEncoder(w),
+		nextPID: runPID + 1,
 	}
 
 	for _, opt := range opts {
@@ -86,145 +99,134 @@ func (tw *TraceWriter) AddTest2JSONLine(line []byte) error {
 	if err := json.Unmarshal(line, &t2j); err != nil {
 		return err
 	}
-	if tw.start.Equal(time.Time{}) {
+	if tw.start.IsZero() {
 		tw.start = t2j.Time
 	}
 
-	pid, err := tw.getOrAssignPID(t2j.Package)
+	pid, err := tw.pidFor(t2j.Package)
 	if err != nil {
 		return err
 	}
 
+	if t2j.Test == "" {
+		return tw.handlePackage(&t2j, pid)
+	}
+
+	return tw.handleTest(&t2j, pid)
+}
+
+func (tw *TraceWriter) handlePackage(t2j *test2JSONEvent, pid processID) error {
+	ts := tw.timestampFor(t2j)
 	switch t2j.Action {
 	case actionStart:
 		tw.packagesRunning++
-		if err := tw.addEvent(&event{
-			Type:       eventTypeCounter,
-			Name:       "packages",
-			Categories: []category{catPkg},
-			Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
-			Args: map[string]any{
-				"running": tw.packagesRunning,
-				"passed":  tw.packagesPassed,
-				"failed":  tw.packagesFailed,
-				"skipped": tw.packagesSkipped,
-			},
-		}); err != nil {
+		if err := tw.emitPackagesCounter(ts); err != nil {
 			return err
 		}
-		return tw.addEvent(&event{
+		return tw.emit(&event{
 			Type:       eventTypeDurationStart,
-			Name:       t2j.Package,
+			Name:       string(t2j.Package),
 			Categories: []category{catPkg},
-			Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
+			Timestamp:  ts,
 			ProcessID:  pid,
 			ThreadID:   0,
 		})
-	case actionRun:
-		tw.testsRunning++
-		if err := tw.addEvent(&event{
-			Type:       eventTypeCounter,
-			Name:       "tests",
-			Categories: []category{catTest},
-			Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
-			Args: map[string]any{
-				"running": tw.testsRunning,
-				"passed":  tw.testsPassed,
-				"failed":  tw.testsFailed,
-				"skipped": tw.testsSkipped,
-			},
-		}); err != nil {
+	case actionPass, actionFail, actionSkip:
+		cat := catPkg
+		tw.packagesRunning--
+		switch t2j.Action {
+		case actionPass:
+			tw.packagesPassed++
+		case actionFail:
+			tw.packagesFailed++
+		case actionSkip:
+			tw.packagesSkipped++
+		}
+		if err := tw.emitPackagesCounter(ts); err != nil {
 			return err
 		}
-		tid, err := tw.getOrAssignTID(t2j.Package, t2j.Test)
+		return tw.emit(&event{
+			Type:       eventTypeDurationEnd,
+			Categories: []category{cat},
+			Timestamp:  ts,
+			ProcessID:  pid,
+			ThreadID:   0,
+			Args: func() map[string]any {
+				m := map[string]any{
+					"result": t2j.Action,
+				}
+				if t2j.Elapsed != 0 {
+					// Elapsed time as reported by go.
+					m["elapsed_ms"] = t2j.Elapsed * 1000
+				}
+				return m
+			}(),
+		})
+	case actionPause, actionCont:
+		return nil
+	case actionBench:
+	case actionOutput:
+	default:
+		return fmt.Errorf("unexpected %q action for package event: %+v", t2j.Action, t2j)
+	}
+
+	return nil
+}
+
+func (tw *TraceWriter) handleTest(t2j *test2JSONEvent, pid processID) error {
+	ts := tw.timestampFor(t2j)
+	switch t2j.Action {
+	case actionRun:
+		tw.testsRunning++
+		if err := tw.emitTestsCounter(ts); err != nil {
+			return err
+		}
+		tid, err := tw.tidFor(pid, t2j.Test)
 		if err != nil {
 			return err
 		}
-		return tw.addEvent(&event{
+		return tw.emit(&event{
 			Type:       eventTypeDurationStart,
-			Name:       t2j.Test,
+			Name:       string(t2j.Test),
 			Categories: []category{catTest},
-			Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
+			Timestamp:  ts,
 			ProcessID:  pid,
 			ThreadID:   tid,
 		})
 	case actionPass, actionFail, actionSkip:
-		var (
-			cat category
-			tid int
-		)
-		if t2j.Test == "" {
-			cat = catPkg
-			tid = 0
-			tw.packagesRunning--
-			switch t2j.Action {
-			case actionPass:
-				tw.packagesPassed++
-			case actionFail:
-				tw.packagesFailed++
-			case actionSkip:
-				tw.packagesSkipped++
-			}
-			if err := tw.addEvent(&event{
-				Type:       eventTypeCounter,
-				Name:       "packages",
-				Categories: []category{catPkg},
-				Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
-				Args: map[string]any{
-					"running": tw.packagesRunning,
-					"passed":  tw.packagesPassed,
-					"failed":  tw.packagesFailed,
-					"skipped": tw.packagesSkipped,
-				},
-			}); err != nil {
-				return err
-			}
-		} else {
-			cat = catTest
-			tid, err = tw.releaseTID(t2j.Package, t2j.Test)
-			if err != nil {
-				return err
-			}
-			tw.testsRunning--
-			switch t2j.Action {
-			case actionPass:
-				tw.testsPassed++
-			case actionFail:
-				tw.testsFailed++
-			case actionSkip:
-				tw.testsSkipped++
-			}
-			if err := tw.addEvent(&event{
-				Type:       eventTypeCounter,
-				Name:       "tests",
-				Categories: []category{catTest},
-				Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
-				Args: map[string]any{
-					"running": tw.testsRunning,
-					"passed":  tw.testsPassed,
-					"failed":  tw.testsFailed,
-					"skipped": tw.testsSkipped,
-				},
-			}); err != nil {
-				return err
-			}
+		cat := catTest
+		tid, err := tw.closeTID(pid, t2j.Test)
+		if err != nil {
+			return err
 		}
-		if t2j.Action == actionFail && t2j.Test != "" {
-			if err := tw.addEvent(&event{
+		tw.testsRunning--
+		switch t2j.Action {
+		case actionPass:
+			tw.testsPassed++
+		case actionFail:
+			tw.testsFailed++
+		case actionSkip:
+			tw.testsSkipped++
+		}
+		if err := tw.emitTestsCounter(ts); err != nil {
+			return err
+		}
+		if t2j.Action == actionFail {
+			if err := tw.emit(&event{
 				Type:      eventTypeInstant,
 				Name:      fmt.Sprintf("%s FAILED", t2j.Test),
 				Scope:     scopeThread,
-				Timestamp: t2j.Time.Sub(tw.start).Microseconds(),
+				Timestamp: ts,
 				ProcessID: pid,
 				ThreadID:  tid,
 			}); err != nil {
 				return err
 			}
 		}
-		return tw.addEvent(&event{
+		return tw.emit(&event{
 			Type:       eventTypeDurationEnd,
 			Categories: []category{cat},
-			Timestamp:  t2j.Time.Sub(tw.start).Microseconds(),
+			Timestamp:  ts,
 			ProcessID:  pid,
 			ThreadID:   tid,
 			Args: map[string]any{
@@ -235,24 +237,27 @@ func (tw *TraceWriter) AddTest2JSONLine(line []byte) error {
 		return nil
 	case actionBench:
 	case actionOutput:
+	default:
+		return fmt.Errorf("unexpected %q action for test event: %+v", t2j.Action, t2j)
 	}
 
 	return nil
 }
 
-func (tw *TraceWriter) getOrAssignPID(pkg string) (int, error) {
+func (tw *TraceWriter) pidFor(pkg pkgName) (processID, error) {
 	if pid, ok := tw.pids[pkg]; ok {
 		return pid, nil
 	}
 
 	if tw.pids == nil {
-		tw.pids = make(map[string]int)
+		tw.pids = make(map[pkgName]processID)
 	}
-	pid := 1 + len(tw.pids)
+	pid := tw.nextPID
+	tw.nextPID++
 	tw.pids[pkg] = pid
 
 	// Now emit metadata events to affect how the new package's PID is displayed.
-	if err := tw.addEvent(&event{
+	if err := tw.emit(&event{
 		Type:      eventTypeMetadata,
 		Name:      metadataProcessName,
 		ProcessID: pid,
@@ -263,7 +268,7 @@ func (tw *TraceWriter) getOrAssignPID(pkg string) (int, error) {
 	}); err != nil {
 		return 0, err
 	}
-	if err := tw.addEvent(&event{
+	if err := tw.emit(&event{
 		Type:      eventTypeMetadata,
 		Name:      metadataThreadName,
 		ProcessID: pid,
@@ -278,75 +283,126 @@ func (tw *TraceWriter) getOrAssignPID(pkg string) (int, error) {
 	return pid, nil
 }
 
-func (tw *TraceWriter) getOrAssignTID(pkg, test string) (int, error) {
+func (tw *TraceWriter) tidFor(pid processID, test testName) (threadID, error) {
 	if tw.tids == nil {
-		tw.tids = make(map[string]map[string]int)
+		tw.tids = make(map[processID]*tids)
 	}
-	if tw.tids[pkg] == nil {
-		tw.tids[pkg] = make(map[string]int)
-	}
-
-	pid, err := tw.getOrAssignPID(pkg)
-	if err != nil {
-		return 0, err
+	if tw.tids[pid] == nil {
+		tw.tids[pid] = new(tids)
 	}
 
-	if tid, ok := tw.tids[pkg][test]; ok {
-		return tid, nil
+	tid, opened := tw.tids[pid].getOrOpenTID(test)
+	if opened {
+		// Now emit metadata event to affect how the TID is displayed.
+		if err := tw.emit(&event{
+			Type:      eventTypeMetadata,
+			Name:      metadataThreadName,
+			ProcessID: pid,
+			ThreadID:  tid,
+			Args: map[string]any{
+				"name": "lane",
+			},
+		}); err != nil {
+			return 0, err
+		}
 	}
 
-	if tw.tidPools == nil {
-		tw.tidPools = make(map[string]tidPool)
-	}
-	if tw.tidPools[pkg] == nil {
-		tw.tidPools[pkg] = tidPool{}
-	}
+	return tid, nil
+}
 
-	tid := tw.tidPools[pkg].lowestAvailable()
-	tw.tids[pkg][test] = tid
-	log.Printf("assigning %d for %s %s", tid, pkg, test)
+func (tw *TraceWriter) closeTID(pid processID, test testName) (threadID, error) {
+	tid := tw.tids[pid].getTID(test)
+	if tid == 0 {
+		return 0, fmt.Errorf("tried to close span for test %q but it didn't have a start", test)
+	}
+	tw.tids[pid].closeTID(tid)
+	return tid, nil
+}
 
-	// Now emit metadata event to affect how the TID is displayed.
-	if err := tw.addEvent(&event{
-		Type:      eventTypeMetadata,
-		Name:      metadataThreadName,
-		ProcessID: pid,
-		ThreadID:  tid,
+func (tw *TraceWriter) emitPackagesCounter(ts microseconds) error {
+	// TODO: coalesce counter events to some reasonable maximum rate like 100Hz.
+	return tw.emit(&event{
+		Type:       eventTypeCounter,
+		Name:       "packages",
+		Categories: []category{catPkg},
+		Timestamp:  ts,
+		ProcessID:  runPID,
+		ThreadID:   0,
 		Args: map[string]any{
-			"name": "lane",
+			"running": tw.packagesRunning,
+			"passed":  tw.packagesPassed,
+			"failed":  tw.packagesFailed,
+			"skipped": tw.packagesSkipped,
 		},
-	}); err != nil {
-		return 0, err
-	}
-
-	return tid, nil
+	})
 }
 
-func (tw *TraceWriter) releaseTID(pkg, test string) (int, error) {
-	tid, err := tw.getOrAssignTID(pkg, test)
-	if err != nil {
-		return 0, err
-	}
-	tw.tidPools[pkg].release(tid)
-	delete(tw.tids[pkg], test)
-	return tid, nil
+func (tw *TraceWriter) emitTestsCounter(ts microseconds) error {
+	// TODO: coalesce counter events to some reasonable maximum rate like 100Hz.
+	return tw.emit(&event{
+		Type:       eventTypeCounter,
+		Name:       "tests",
+		Categories: []category{catPkg},
+		Timestamp:  ts,
+		ProcessID:  runPID,
+		ThreadID:   0,
+		Args: map[string]any{
+			"running": tw.testsRunning,
+			"passed":  tw.testsPassed,
+			"failed":  tw.testsFailed,
+			"skipped": tw.testsSkipped,
+		},
+	})
 }
 
-func (tw *TraceWriter) addEvent(e *event) error {
+func (tw *TraceWriter) emit(e *event) error {
 	return json.MarshalEncode(tw.enc, e)
 }
 
-type tidPool map[int]struct{}
+func (tw *TraceWriter) timestampFor(t2j *test2JSONEvent) microseconds {
+	if t2j.Time.IsZero() {
+		return tw.lastTimestamp
+	}
+	ts := microseconds(t2j.Time.Sub(tw.start).Microseconds())
+	tw.lastTimestamp = ts
+	return ts
+}
 
-func (tp tidPool) lowestAvailable() int {
-	for tid := 1; ; tid++ {
-		if _, taken := tp[tid]; !taken {
-			tp[tid] = struct{}{}
-			return tid
+// tids is the metadata for all tests of a single test package.
+type tids struct {
+	assigned map[testName]threadID // All assigned thread IDs across the test package lifetime.
+	open     map[threadID]bool     // The set of currently running thread IDs at this moment in time.
+}
+
+func (t *tids) getTID(test testName) threadID {
+	if t.assigned == nil {
+		t.assigned = make(map[testName]threadID)
+	}
+	if t.open == nil {
+		t.open = make(map[threadID]bool)
+	}
+
+	if tid, ok := t.assigned[test]; ok {
+		return tid
+	}
+
+	return 0
+}
+
+func (t *tids) getOrOpenTID(test testName) (threadID, bool) {
+	if tid := t.getTID(test); tid != 0 {
+		return tid, false
+	}
+
+	for tid := threadID(1); ; tid++ {
+		if !t.open[tid] {
+			t.assigned[test] = tid
+			t.open[tid] = true
+			return tid, true
 		}
 	}
 }
 
-func (tp tidPool) release(tid int) {
-	delete(tp, tid)
+func (t *tids) closeTID(tid threadID) {
+	t.open[tid] = false
 }

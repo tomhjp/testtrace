@@ -24,10 +24,10 @@ type test2JSONEvent struct {
 	// Specifies the package being tested. When the go command runs parallel tests
 	// in -json mode, events from different tests are interlaced; the Package
 	// field allows readers to separate them.
-	Package string
+	Package pkgName
 	// Specifies the test, example, or benchmark function that caused the event.
 	// Events for the overall package test do not set Test.
-	Test string `json:",omitzero"`
+	Test testName `json:",omitzero"`
 	// Seconds. Set for "pass" and "fail" events. It gives the time elapsed for the
 	// specific test or the overall package test that passed or failed.
 	Elapsed float64 `json:",omitzero"`
